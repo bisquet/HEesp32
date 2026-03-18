@@ -1,0 +1,17 @@
+# ==========================================
+# AISLAMIENTO DEL SISTEMA (Ignorar siempre)
+# ==========================================
+
+# Ignorar todo
+*
+
+# No ignorar directorios (para poder buscar archivos dentro)
+!*/
+
+# Excepciones (Archivos permitidos explícitamente)
+!.gitignore
+!platformio.ini
+!src/main.cpp
+!host/monitor.py
+!requirements.txt
+!README.md
