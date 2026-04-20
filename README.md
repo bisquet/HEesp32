@@ -1,6 +1,6 @@
 # 📡 HEesp32 - Plataforma de Auditoría 802.11 Bare-Metal
 
-**Entorno de Laboratorio:** Práctica de Ciberseguridad y Redes Inalámbricas (ASIR).
+**Entorno de Laboratorio:** Práctica de Ciberseguridad y Redes Inalámbricas (ASIR y ciberseguridad).
 
 > **Objetivo:** Desplegar una arquitectura asimétrica de captura pasiva (Sniffing EAPOL) mediante hardware dedicado (ESP32) y orquestación de fuerza bruta local (Hashcat/RTX).
 
