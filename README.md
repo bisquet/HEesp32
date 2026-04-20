@@ -1,3 +1,19 @@
+## ⚖️ AVISO LEGAL Y ÉTICO (LEER ANTES DE USAR)
+
+🔒 **Propósito exclusivo:** Esta herramienta ha sido desarrollada **únicamente con fines educativos y de investigación en ciberseguridad**. Está diseñada para su uso en entornos de laboratorio controlados, redes propias o sistemas sobre los que se posea **autorización expresa y por escrito** del propietario.
+
+⚠️ **Responsabilidad del usuario:** El uso de este software contra redes, dispositivos o sistemas sin autorización explícita es **ilegal**. El autor y los colaboradores del proyecto **no asumen responsabilidad alguna** por el mal uso, daños, interrupciones de servicio o consecuencias legales derivadas de su utilización fuera de un contexto ético y autorizado. Cada usuario asume la **total responsabilidad civil y penal** de sus actos.
+
+🇪🇸 **Marco normativo (España):** La realización de ataques de desautenticación, captura de handshakes o fuerza bruta sobre redes ajenas sin consentimiento constituye delito tipificado en los artículos 197, 197ter y 264 del **Código Penal**, así como infracciones graves bajo la **LOPDGDD (LO 3/2018)**. Consulta siempre la legislación vigente de tu jurisdicción.
+
+✅ **Uso correcto recomendado:**
+- Redes de laboratorio aisladas.
+- Equipos y routers de tu propiedad.
+- Entornos de formación con supervisión docente.
+- Auditorías con contrato/pacto de confidencialidad firmado.
+
+> 📜 *Al clonar, compilar o ejecutar este proyecto, declaras haber leído, comprendido y aceptado estos términos. Si no estás de acuerdo, no utilices el software.*
+
 # 📡 HEesp32 - Plataforma de Auditoría 802.11 Bare-Metal
 
 **Entorno de Laboratorio:** Práctica de Ciberseguridad y Redes Inalámbricas (ASIR y ciberseguridad).
