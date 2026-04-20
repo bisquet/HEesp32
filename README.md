@@ -70,3 +70,54 @@ Una vez dentro de la consola `HEesp32>`, el flujo táctico es el siguiente:
 * `verify brute <mask>`: Lanza el ataque de fuerza bruta pura y pone a prueba el límite térmico de la GPU (ej: `?d?d?d?d?d?d?d?d`).
 * `verify dict <pcap> <diccionario.txt>`: Extrae el Handshake y lanza el ataque por diccionario. Para este laboratorio utilizaremos un diccionario extraído directamente de la base de datos europea de credenciales, lo que nos proporcionará un escenario de colisión de hashes totalmente realista para nuestro entorno.
 * `verify brute <pcap> <mascara>`: Lanza el ataque de fuerza bruta pura y pone a prueba el límite térmico de la GPU (ej: ?d?d?d?d?d?d?d?d).
+
+---
+
+## 🎯 Módulo DEAUTH - Guía Pedagógica
+
+### ¿Qué es un frame Deauth?
+
+Un frame de **Deauthentication** (802.11 Management, subtype `0xC0`) es el mecanismo que usa un AP o un cliente para cerrar una asociación WiFi. Es un frame **no autenticado**: cualquiera puede enviarlo suplantando la MAC del AP, y el cliente lo obedecerá sin verificar. Esta es la vulnerabilidad fundamental de 802.11.
+
+### Estructura del frame (26 bytes)
+
+| Offset | Campo | Valor | Descripción |
+|--------|-------|-------|-------------|
+| 0-1 | Frame Control | `0xC0 0x00` | Management, Deauth |
+| 2-3 | Duration | `0x00 0x00` | No usado |
+| 4-9 | Address 1 | MAC destino | Cliente o `FF:FF:FF:FF:FF:FF` (broadcast) |
+| 10-15 | Address 2 | MAC origen | MAC del AP (BSSID) |
+| 16-21 | Address 3 | BSSID | MAC del AP |
+| 22-23 | Sequence Ctrl | Variable | Counter propio (evita replay detection) |
+| 24 | Reason Code | 1-255 | Motivo de la desconexión |
+| 25 | Padding | `0x00` | Alineamiento |
+
+### Reason Codes comunes
+
+| Code | Significado | Uso pedagógico |
+|------|-------------|----------------|
+| 1 | Unspecified reason | Genérico, menos sospechoso |
+| 2 | Previous authentication invalid | Simula fallo de autenticación |
+| 7 | Class 3 frame from nonassociated STA | **Más creíble** para demos, parece error de red |
+
+### Sintaxis del comando
+
+```bash
+# En monitor.py:
+deauth <AP_MAC> --client <MAC>|--broadcast --reason <1-255> [--count N] [--delay ms]
+
+# Ejemplos:
+deauth AA:BB:CC:DD:EE:FF --broadcast --reason 7 --count 10 --delay 100
+deauth AA:BB:CC:DD:EE:FF --client 11:22:33:44:55:66 --reason 1 --count 5
+```
+
+### Detección defensiva (WIDS/IDS)
+
+Un IDS empresarial (Cisco ISE, Aruba ClearPass, WIDS) detecta ráfagas de deauth por:
+1. **Rate anomaly**: >5 deauth/segundo desde una MAC no asociada
+2. **Sequence gap**: Saltos en el sequence number del frame
+3. **RSSI mismatch**: El frame deauth llega con potencia diferente al AP legítimo
+
+**Ciclo completo de laboratorio**: Ataque → Captura Wireshark → Análisis IDS → Configuración de reglas de detección.
+
+> ⚖️ **MARCO LEGAL**: Este módulo es exclusivamente para entornos de laboratorio con autorización. El uso no autorizado de frames de deauth contra redes de terceros constituye un delito tipificado en la **Ley Orgánica 10/2022** de ciberseguridad y el **Código Penal Art. 197ter**.

