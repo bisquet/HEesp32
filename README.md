@@ -1,6 +1,3 @@
-
-
-```
 # 📡 HEesp32 - Plataforma de Auditoría 802.11 Bare-Metal
 
 **Entorno de Laboratorio:** Práctica de Ciberseguridad y Redes Inalámbricas (ASIR).
@@ -71,8 +68,6 @@ Una vez dentro de la consola `HEesp32>`, el flujo táctico es el siguiente:
 * `lock <target>`: Fija la antena en el objetivo para iniciar la captura pasiva.
 * `verify dict <diccionario.txt>`: Extrae el *Handshake* y lanza el ataque por diccionario. *(Para este laboratorio utilizaremos un diccionario extraído directamente de la base de datos europea de credenciales, lo que proporcionará un escenario de colisión de hashes totalmente realista).*
 * `verify brute <mask>`: Lanza el ataque de fuerza bruta pura y pone a prueba el límite térmico de la GPU (ej: `?d?d?d?d?d?d?d?d`).
+* `verify dict <pcap> <diccionario.txt>`: Extrae el Handshake y lanza el ataque por diccionario. Para este laboratorio utilizaremos un diccionario extraído directamente de la base de datos europea de credenciales, lo que nos proporcionará un escenario de colisión de hashes totalmente realista para nuestro entorno.
+* `verify brute <pcap> <mascara>`: Lanza el ataque de fuerza bruta pura y pone a prueba el límite térmico de la GPU (ej: ?d?d?d?d?d?d?d?d).
 ```
-
-verify dict <pcap> <diccionario.txt>: Extrae el Handshake y lanza el ataque por diccionario. Para este laboratorio utilizaremos un diccionario extraído directamente de la base de datos europea de credenciales, lo que nos proporcionará un escenario de colisión de hashes totalmente realista para nuestro entorno.
-
-verify brute <pcap> <mascara>: Lanza el ataque de fuerza bruta pura y pone a prueba el límite térmico de la GPU (ej: ?d?d?d?d?d?d?d?d).
