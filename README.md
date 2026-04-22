@@ -154,7 +154,27 @@ El módulo DEAUTH en HEesp32 tiene una **limitación técnica del hardware ESP32
 
 **Problema:** `esp_wifi_80211_tx()` en ESP32 vanilla rechaza frames management (como deauth, subtype 0xC0) con error `ESP_ERR_WIFI_MODE (0x102)` y mensaje `unsupport frame type: 0c0`. El driver WiFi no permite spoofing de BSSID cuando no hay asociación activa.
 
-**Solución implementada:** Para demo pedagógica de deauth, usar las **herramientas del host** (aireplay-ng, mdk3) en lugar del ESP32:
+**Solución A (experimental): WSL Bypasser**  
+El componente `wsl_bypasser` de risinek permite inyectar frames management evadiendo `ieee80211_raw_frame_sanity_check()` mediante link-time symbol override. Esta técnica requiere:
+
+1. **Framework IDF puro** (no Arduino): Cambiar `framework = arduino` → `framework = espidf` en `platformio.ini`
+2. **CMakeLists.txt nativo**: PlatformIO en modo espidf usa estructura CMake de IDF
+3. **IDF 4.1-4.4 compatible**: El bypass fue diseñado para estas versiones
+
+```bash
+# Estructura requerida para WSL bypass:
+components/
+  wsl_bypasser/
+    wsl_bypasser.c    # Link-time override de ieee80211_raw_frame_sanity_check()
+    CMakeLists.txt    # target_link_libraries(${COMPONENT_LIB} -Wl,-zmuldefs)
+```
+
+**Solución B (disponible): Rogue AP**  
+Método por defecto en HEesp32. Configura ESP32 como AP falso con misma MAC/SSID que el objetivo. Cuando el cliente intenta conectar, el stack 802.11 responde naturalmente causando desconexión.
+
+**Solución C (herramientas del host):**  
+Usar herramientas del host (aireplay-ng, mdk3) en lugar del ESP32 para envío de frames deauth.
+
 ```bash
 # Poner interfaz WiFi del host en modo monitor
 sudo airmon-ng start wlan0 11
@@ -162,6 +182,15 @@ sudo airmon-ng start wlan0 11
 # Enviar frames deauth
 sudo aireplay-ng --deauth 5 -a <AP_MAC> -c <CLIENT_MAC> wlan0mon
 ```
+
+### Tabla comparativa de métodos DEAUTH
+
+| Método | Requisito | Efectividad | Complejidad |
+|--------|-----------|--------------|--------------|
+| `direct` (vanilla) | Ninguno | ❌ No funciona en ESP32 | Mínima |
+| `direct` (WSL bypass) | IDF puro + CMake | ✅ Experimental | Alta |
+| `rogue` (AP duplicado) | Ninguno | ⚠️ Requiere cliente activo | Media |
+| Host tools (aireplay) | Adaptador WiFi con monitor | ✅ Funciona | Media |
 
 El ESP32 sigue siendo operativo para:
 - ✅ `scan`: Escaneo de APs con RSSI
