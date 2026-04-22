@@ -9,7 +9,7 @@ import glob
 from datetime import datetime
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import WordCompleter, Completion, Completer
 from prompt_toolkit.formatted_text import HTML
 
 # Importar scapy una sola vez al inicio
@@ -23,7 +23,10 @@ SERIAL_PORT = '/dev/ttyUSB0'  # Adjust if needed
 BAUD_RATE = 115200
 
 # Comandos disponibles para autocompletado y banner
-COMMAND_LIST = ["scan", "stop", "lock", "deauth", "clients", "verify", "help", "status", "capture", "clear", "port", "ls", "exit"]
+COMMAND_LIST = ["scan", "stop", "lock", "deauth", "clients", "verify", "help", "status", "capture", "clear", "port", "ls", "exit", "aps"]
+
+# Diccionario de APs detectados en sesión: bssid -> {channel, rssi, ssid, last_seen}
+DETECTED_APS = {}
 
 # Archivo PCAP actual (se puede cambiar con 'capture')
 CURRENT_PCAP = "captura_laboratorio.pcap"
@@ -105,8 +108,16 @@ def list_pcaps() -> None:
 
 def listener_thread(ser: serial.Serial) -> None:
     """Hilo encargado de escuchar el puerto serie e imprimir."""
-    global FRAME_COUNT
+    global FRAME_COUNT, DETECTED_APS
     buffer = bytearray()
+    # Regex formato nuevo (con RSSI)
+    beacon_regex_new = re.compile(
+        r'\[BEACON\]\s+CH:\s*(\d+)\s*\|\s*RSSI:\s*(-?\d+)\s*\|\s*BSSID:\s*([0-9A-Fa-f:]+)\s*\|\s*SSID:\s*(.+)'
+    )
+    # Regex formato viejo (sin RSSI) - fallback
+    beacon_regex_old = re.compile(
+        r'\[BEACON\]\s+CH:\s*(\d+)\s*\|\s*BSSID:\s*([0-9A-Fa-f:]+)\s*\|\s*SSID:\s*(.+)'
+    )
     try:
         while not exit_event.is_set():
             if ser.in_waiting > 0:
@@ -126,6 +137,37 @@ def listener_thread(ser: serial.Serial) -> None:
                     if not line:
                         continue
                         
+                    # Detectar y parsear beacons para almacenar APs
+                    beacon_match = beacon_regex_new.match(line)
+                    if beacon_match:
+                        ch = int(beacon_match.group(1))
+                        rssi = int(beacon_match.group(2))
+                        bssid = beacon_match.group(3).upper()
+                        ssid = beacon_match.group(4).strip()
+                        now = time.time()
+                        if bssid not in DETECTED_APS or rssi > DETECTED_APS[bssid]["rssi"]:
+                            DETECTED_APS[bssid] = {
+                                "channel": ch,
+                                "rssi": rssi,
+                                "ssid": ssid,
+                                "last_seen": now
+                            }
+                    else:
+                        # Fallback: formato viejo sin RSSI
+                        beacon_match_old = beacon_regex_old.match(line)
+                        if beacon_match_old:
+                            ch = int(beacon_match_old.group(1))
+                            bssid = beacon_match_old.group(2).upper()
+                            ssid = beacon_match_old.group(3).strip()
+                            now = time.time()
+                            if bssid not in DETECTED_APS:
+                                DETECTED_APS[bssid] = {
+                                    "channel": ch,
+                                    "rssi": 0,  # Desconocido
+                                    "ssid": ssid,
+                                    "last_seen": now
+                                }
+
                     if line.startswith("[RAW] "):
                         hex_str = line[6:].strip()
                         try:
@@ -151,6 +193,21 @@ def print_command_banner() -> None:
     """Imprime la línea de comandos disponibles para el prompt."""
     print(f"[{'|'.join(COMMAND_LIST)}]")
 
+def print_aps_table() -> None:
+    """Imprime la tabla de APs detectados ordenada por RSSI (mejor primero)."""
+    if not DETECTED_APS:
+        print("[*] No se han detectado APs en esta sesión.")
+        return
+    
+    sorted_aps = sorted(DETECTED_APS.items(), key=lambda x: x[1]["rssi"], reverse=True)
+    
+    print("=== APs Detectados (sesión actual) ===")
+    print(f"{'RSSI':>5}  {'CH':>3}  {'BSSID':<18}  {'SSID'}")
+    print("-" * 55)
+    for bssid, info in sorted_aps:
+        ssid_display = info["ssid"] if info["ssid"] != "<oculto>" else "<oculto>"
+        print(f"{info['rssi']:>5}  {info['channel']:>3}  {bssid:<18}  {ssid_display}")
+
 def print_help() -> None:
     """Muestra la ayuda completa de comandos."""
     print("=== HEesp32 C2 - Comandos Disponibles ===")
@@ -169,8 +226,54 @@ def print_help() -> None:
     print("port <puerto>           - Cambiar puerto serie (ej: /dev/ttyUSB1)")
     print("ls                      - Listar capturas PCAP (atajo)")
     print("clear                   - Limpiar pantalla")
+    print("aps                     - Listar APs detectados en sesión actual (ordenados por RSSI)")
     print("help                    - Mostrar esta ayuda")
     print("exit                    - Salir del programa")
+
+class APCompleter(Completer):
+    """Completer dinámico: comandos en prompt vacío, APs tras 'lock ' o 'clients '."""
+    
+    def __init__(self, commands, **kwargs):
+        self.commands = commands
+        self.ignore_case = kwargs.get('ignore_case', True)
+    
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        text_stripped = text.strip()
+        text_lower = text_stripped.lower()
+        
+        # Detectar si estamos en contexto de lock/clients con espacio
+        if text_lower.startswith("lock ") or text_lower.startswith("clients "):
+            # Contexto AP: solo sugerir APs detectados
+            if DETECTED_APS:
+                sorted_aps = sorted(DETECTED_APS.items(), key=lambda x: x[1]["rssi"], reverse=True)
+                for bssid, info in sorted_aps:
+                    ssid_display = info["ssid"] if info["ssid"] != "<oculto>" else "<oculto>"
+                    display_text = f"{bssid} ({ssid_display}) [RSSI:{info['rssi']}]"
+                    if text_lower.startswith("lock "):
+                        suggestion = f"{bssid} {info['channel']}"
+                    else:
+                        suggestion = bssid
+                    # Calcular start_position desde la última palabra
+                    words = text.split()
+                    if words:
+                        last_word = words[-1]
+                        start_pos = -len(last_word)
+                    else:
+                        start_pos = 0
+                    yield Completion(suggestion, start_position=start_pos, display=display_text)
+            # Si no hay APs, no sugerir nada (evitar COMMAND_LIST)
+            return
+        
+        # Contexto normal: sugerir comandos
+        word_before_cursor = text_stripped.split()[-1] if text_stripped.split() else text_stripped
+        for cmd in self.commands:
+            if self.ignore_case:
+                if cmd.lower().startswith(word_before_cursor.lower()):
+                    yield Completion(cmd, start_position=-len(word_before_cursor), display=cmd)
+            else:
+                if cmd.startswith(word_before_cursor):
+                    yield Completion(cmd, start_position=-len(word_before_cursor), display=cmd)
 
 def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
     """
@@ -192,7 +295,11 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
     elif cmd_input == "stop":
         CAPTURE_START_TIME = None
         ser.write(b"CMD:IDLE\n")
-    elif cmd_input.startswith("lock"):
+    elif cmd_input == "lock":
+        # lock sin argumentos -> mostrar APs detectados como sugerencias
+        print("[*] APs detectados en sesión (usa uno para lock <MAC> <CANAL>):")
+        print_aps_table()
+    elif cmd_input.startswith("lock "):
         # Expected: lock A1:B2:C3:D4:E5:F6 6
         match = re.match(r"lock\s+([0-9a-fA-F:]+)\s+(\d+)", cmd_input)
         if match:
@@ -300,7 +407,11 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
         print(f"[*] Enviando frames de deauthentication (vulnerabilidad 802.11)")
         
         ser.write(formatted_cmd.encode('utf-8'))
-    elif cmd_input.startswith("clients"):
+    elif cmd_input == "clients":
+        # clients sin argumentos -> mostrar APs detectados como sugerencias
+        print("[*] APs detectados en sesión (usa uno para clients <MAC>):")
+        print_aps_table()
+    elif cmd_input.startswith("clients "):
         # clients AA:BB:CC:DD:EE:FF
         match = re.match(r"clients\s+([0-9a-fA-F:]+)", cmd_input)
         if match:
@@ -427,7 +538,6 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
             # Forzar nuevo archivo con sufijo automático
             base = CURRENT_PCAP
             # Si ya tiene sufijo _XXX, quitarlo para usar el nombre base original
-            import re
             match = re.match(r'(.+?)_\d{3}\.pcap$', base)
             if match:
                 base = match.group(1) + '.pcap'
@@ -459,6 +569,8 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
         os.system('clear')
     elif cmd_input == "ls":
         list_pcaps()
+    elif cmd_input == "aps":
+        print_aps_table()
     elif cmd_input == "":
         pass
     else:
@@ -500,7 +612,7 @@ def main() -> None:
     print("\n--- HEesp32 C2 Consola Interactiva ---")
     print("Escribe 'help' para ver todos los comandos disponibles.\n")
 
-    completer = WordCompleter(COMMAND_LIST, ignore_case=True)
+    completer = APCompleter(COMMAND_LIST, ignore_case=True)
     session = PromptSession(completer=completer)
 
     try:
@@ -518,9 +630,6 @@ def main() -> None:
         print("\n[+] EOF detectado. Saliendo...")
     finally:
         shutdown(ser)
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()
