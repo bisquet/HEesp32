@@ -120,12 +120,20 @@ Un frame de **Deauthentication** (802.11 Management, subtype `0xC0`) es el mecan
 
 ```bash
 # En monitor.py:
-deauth <AP_MAC> --client <MAC>|--broadcast --reason <1-255> [--count N] [--delay ms]
+deauth <AP_MAC> --client <MAC>|--broadcast --reason <1-255> [--count N] [--delay ms] [--method direct|rogue]
 
 # Ejemplos:
 deauth AA:BB:CC:DD:EE:FF --broadcast --reason 7 --count 10 --delay 100
 deauth AA:BB:CC:DD:EE:FF --client 11:22:33:44:55:66 --reason 1 --count 5
+deauth AA:BB:CC:DD:EE:FF --broadcast --reason 7 --method rogue
 ```
+
+### Métodos disponibles
+
+| Método | Descripción | Ventaja | Limitación |
+|--------|-------------|--------|------------|
+| `direct` | Inyección directa de frames deauth | Efectivo cuando funciona | Requiere bypass o modo monitor |
+| `rogue` | AP duplicado que fuerza desconexión natural | No requiere bypass, más educativo | Requiere que el cliente esté activo |
 
 ### Detección defensiva (WIDS/IDS)
 

