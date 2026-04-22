@@ -81,11 +81,25 @@ Una vez dentro de la consola `HEesp32>`, el flujo táctico es el siguiente:
 
 * `scan`: Inicia el *Channel Hopper* para mapear el espectro.
 * `stop`: Detiene cualquier operación activa.
-* `lock <target>`: Fija la antena en el objetivo para iniciar la captura pasiva.
-* `verify dict <diccionario.txt>`: Extrae el *Handshake* y lanza el ataque por diccionario. *(Para este laboratorio utilizaremos un diccionario extraído directamente de la base de datos europea de credenciales, lo que proporcionará un escenario de colisión de hashes totalmente realista).*
-* `verify brute <mask>`: Lanza el ataque de fuerza bruta pura y pone a prueba el límite térmico de la GPU (ej: `?d?d?d?d?d?d?d?d`).
-* `verify dict <pcap> <diccionario.txt>`: Extrae el Handshake y lanza el ataque por diccionario. Para este laboratorio utilizaremos un diccionario extraído directamente de la base de datos europea de credenciales, lo que nos proporcionará un escenario de colisión de hashes totalmente realista para nuestro entorno.
-* `verify brute <pcap> <mascara>`: Lanza el ataque de fuerza bruta pura y pone a prueba el límite térmico de la GPU (ej: ?d?d?d?d?d?d?d?d).
+* `lock&cap <MAC> <CANAL>`: Fija la antena en el objetivo y captura tráfico. (Alias temporal: `lock` funciona con warning)
+* `crack dict <pcap> <diccionario>`: Extrae el *Handshake* y lanza ataque por diccionario. *(Para este laboratorio utilizaremos un diccionario extraído directamente de la base de datos europea de credenciales, lo que proporcionará un escenario de colisión de hashes totalmente realista).*
+* `crack brute <pcap> <máscara>`: Lanza el ataque de fuerza bruta pura y pone a prueba el límite térmico de la GPU (ej: `?d?d?d?d?d?d?d?d`).
+* `crack hybrid <pcap> <diccionario> <máscara>`: Híbrido diccionario + máscara.
+* `crack raw <pcap> <args...>`: Modo experto: pasar flags crudos a hashcat.
+
+**Opciones comunes de crack:**
+* `--rules <archivo.rule>`: Aplicar reglas hashcat (ej: `--rules best64.rule`).
+* `--gpu-temp <N>`: Límite temperatura GPU en °C (ej: `--gpu-temp 65`).
+* `--show`: Mostrar contraseñas crackeadas previamente.
+* `--restore`: Reanudar sesión hashcat interrumpida.
+
+**Ejemplos pedagógicos:**
+```bash
+crack dict captura.pcap rockyou.txt
+crack dict captura.pcap rockyou.txt --rules best64.rule
+crack brute captura.pcap '?d?d?d?d?d?d?d?d'
+crack hybrid captura.pcap rockyou.txt '?d?d?d?d'
+```
 
 ---
 
@@ -194,7 +208,60 @@ sudo aireplay-ng --deauth 5 -a <AP_MAC> -c <CLIENT_MAC> wlan0mon
 
 El ESP32 sigue siendo operativo para:
 - ✅ `scan`: Escaneo de APs con RSSI
-- ✅ `lock`: Captura de tráfico en canal específico
+- ✅ `lock&cap`: Captura de tráfico en canal específico
 - ✅ `clients`: Detección de clientes asociados
 - ✅ Captura de handshakes para hashcat
 - ❌ `deauth`: Requiere host con monitor mode (por ahora)
+
+---
+
+### 🔓 Módulo CRACK - Fuerza Bruta Inteligente
+
+HEesp32 integra `hashcat` nativamente para crackear handshakes capturados.
+
+**Sintaxis básica:**
+```bash
+crack dict <pcap> <diccionario> [--rules <archivo>]
+crack brute <pcap> "<máscara>"
+crack hybrid <pcap> <diccionario> "<máscara>"
+crack raw <pcap> <flags_hashcat...>
+```
+
+**Ejemplo pedagógico completo:**
+```bash
+# 1. Capturar handshake (ya hecho con lock&cap)
+# 2. Crackear con diccionario + reglas:
+crack dict handshake.pcap rockyou.txt --rules best64.rule --gpu-temp 65
+
+# 3. Si falla, probar fuerza bruta para PINs de 8 dígitos:
+crack brute handshake.pcap "?d?d?d?d?d?d?d?d"
+
+# 4. Ver resultado:
+crack dict handshake.pcap rockyou.txt --show
+```
+
+**Reglas hashcat (avanzado):**
+Las reglas transforman palabras del diccionario (ej: "password" → "Password123!").
+- `best64.rule`: 64 transformaciones comunes (añadir números, capitalizar, etc.)
+- Crea las tuyas en `rules/mis_reglas.rule` y usa `--rules mis_reglas.rule`.
+
+> 🎓 **Para clase**: Demostrar cómo una regla simple (`$1` = añadir "1" al final) multiplica x1000 el espacio de búsqueda. Enseñar que "inteligente" ≠ "mágico": es matemática aplicada.
+
+**Charset y máscaras hashcat:**
+| Carácter | Significado | Ejemplo |
+|----------|-------------|---------|
+| `?d` | Dígito (0-9) | `?d?d?d?d` = 4 dígitos |
+| `?l` | Minúscula (a-z) | `?l?l?l` = 3 letras min |
+| `?u` | Mayúscula (A-Z) | `?u?u?u` = 3 letras may |
+| `?a` | Todos los caracteres | `?a?a?a` = 3 cualquier tipo |
+| `?s` | Símbolos | `?s?s` = 2 símbolos |
+| `?b` | Bytes (0x00-0xff) | Avanzado |
+
+**Carátulas de progreso hashcat (para entender ETA):**
+```
+Speed.#1     1234.5 kH/s (12.4 MH/s) [Time: 00:12:34]  Keys: 456M/2.1B  (21.7%)  ETF: 2h 14m
+```
+- **kH/s**: Kilo-hashes por segundo (miles)
+- **MH/s**: Mega-hashes por segundo (millones)
+- **Keys**: Claves probadas / Espacio total
+- **ETA**: Tiempo estimado hasta finalización
